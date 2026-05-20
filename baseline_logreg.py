@@ -52,13 +52,6 @@ def assign_sweep_windows(
 ) -> pd.DataFrame:
     """Assign non-overlapping or sliding sweep-window ids inside each dataset."""
 
-    if window_size < 1:
-        raise ValueError("window_size must be >= 1")
-    if step is None:
-        step = window_size
-    if step < 1:
-        raise ValueError("step must be >= 1")
-
     frames: list[pd.DataFrame] = []
     group_cols = ["class_name", "sample_group_name", "run_id", "sample_id"]
 
