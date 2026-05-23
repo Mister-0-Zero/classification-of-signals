@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = PROJECT_ROOT / "data"
 
 CLASS_NAMES = ("AM", "FM", "Noise")
-DEFAULT_EXCLUDED_GROUPS = frozenset({"Noise_101_9"})
+DEFAULT_EXCLUDED_GROUPS = frozenset({"Noise_101_9", "FM_88_3", "FM_95_2"})
 
 AggregateMode = Literal["mean", "median", "none"]
 
