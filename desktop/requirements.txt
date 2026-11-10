@@ -1,0 +1,2 @@
+# Desktop application only; research dependencies and models are not bundled.
+PySide6-Essentials==6.12.0
