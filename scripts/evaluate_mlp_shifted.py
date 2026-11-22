@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 
 
-def load_shifted(project):
+def load_shifted(project, *, normalize=True):
     rows, raw = [], []
     base = project / "data"
     for path in sorted((base / "FM_dop").glob("**/samples/*.csv")):
@@ -26,7 +26,7 @@ def load_shifted(project):
         assert np.array_equal(spectrum.columns, np.arange(501))
         traces = spectrum.to_numpy(dtype=float)
         assert np.isfinite(traces).all()
-        shifted = (traces - traces.max(axis=1, keepdims=True)).astype(np.float32)
+        shifted = (traces - traces.max(axis=1, keepdims=True)).astype(np.float32) if normalize else traces
         raw.extend(shifted)
         for idx in spectrum.index:
             rows.append({"recording": path.relative_to(base).as_posix(), "sweep_idx": idx,
