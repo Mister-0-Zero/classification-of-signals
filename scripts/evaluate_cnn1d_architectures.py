@@ -18,6 +18,7 @@ from evaluate_modulation_mlp import CLASS_NAMES, benchmark, raw_input
 
 
 ARCHITECTURES = ("resolution_501", "late_hybrid", "dilated_hybrid", "late_dense_25")
+COMBINED = ("dilated_dense_25", "residual_multiscale")
 
 
 class RefinedCNN(nn.Module):
@@ -33,14 +34,14 @@ class RefinedCNN(nn.Module):
             self.regional = nn.AdaptiveAvgPool1d(regions)
             self.head = nn.Linear(32 * regions, len(CLASS_NAMES))
         else:
-            dilation_mid, dilation_last = (3, 9) if architecture == "dilated_hybrid" else (1, 1)
+            dilation_mid, dilation_last = (3, 9) if architecture in ("dilated_hybrid", "dilated_dense_25") else (1, 1)
             self.trunk = nn.Sequential(
                 nn.Conv1d(1, 16, 9, padding=4), nn.ReLU(),
                 nn.Conv1d(16, 24, 7, dilation=dilation_mid, padding=3 * dilation_mid), nn.ReLU(),
                 nn.AvgPool1d(2),
                 nn.Conv1d(24, 32, 7, dilation=dilation_last, padding=3 * dilation_last), nn.ReLU(),
             )
-            if architecture == "late_dense_25":
+            if architecture in ("late_dense_25", "dilated_dense_25"):
                 self.regional = nn.AdaptiveAvgPool1d(25)
                 self.head = nn.Sequential(nn.Linear(32 * 25, 64), nn.ReLU(), nn.Linear(64, len(CLASS_NAMES)))
             else:
@@ -54,6 +55,30 @@ class RefinedCNN(nn.Module):
         if self.architecture in ("late_hybrid", "dilated_hybrid"):
             pieces = torch.cat((pieces, signals.mean(dim=-1), signals.amax(dim=-1)), dim=1)
         return self.head(pieces)
+
+
+class ResidualMultiscaleCNN(nn.Module):
+    def __init__(self, _regions):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(1, 16, 9, padding=4), nn.ReLU(),
+            nn.Conv1d(16, 24, 7, dilation=3, padding=9), nn.ReLU(),
+            nn.AvgPool1d(2),
+        )
+        self.local = nn.Conv1d(24, 16, 7, padding=3)
+        self.wide = nn.Conv1d(24, 16, 7, dilation=9, padding=27)
+        self.refine = nn.Conv1d(32, 32, 5, padding=2)
+        self.regional = nn.AdaptiveAvgPool1d(25)
+        self.head = nn.Sequential(nn.Linear(32 * (25 + 2), 64), nn.ReLU(),
+                                  nn.Linear(64, len(CLASS_NAMES)))
+        self.relu = nn.ReLU()
+
+    def forward(self, raw):
+        features = self.stem(raw.unsqueeze(1))
+        merged = self.relu(torch.cat((self.local(features), self.wide(features)), dim=1))
+        refined = self.relu(merged + self.refine(merged))
+        values = torch.cat((self.regional(refined).flatten(1), refined.mean(dim=-1), refined.amax(dim=-1)), dim=1)
+        return self.head(values)
 
 
 def write_results(output, results, ordinary, shifted):
@@ -77,7 +102,7 @@ def write_results(output, results, ordinary, shifted):
     print(results.round(5).to_string(index=False))
 
 
-def main(project, output, training_threads):
+def main(project, output, training_threads, combine=False):
     sys.path.insert(0, str(project))
     from models.modulation.classifier import FEATURE_NAMES, ModulationClassifier, extract_features
     from scripts.evaluate_gb_averaging import fold_mapping, load_recordings
@@ -96,11 +121,13 @@ def main(project, output, training_threads):
     stress, shifted_inputs = load_shifted(project)
     stress["fold"] = stress["group"].map(folds).fillna(0).astype(int)
     assert x.shape == (4850, 501) and shifted_inputs.shape == (750, 501)
-    scores, ordinary, off_center, models = [], [], [], {}
-    for architecture in ARCHITECTURES:
-        factory = partial(RefinedCNN, architecture=architecture)
+    scores, ordinary, off_center, models, diagnostics = [], [], [], {}, []
+    for architecture in COMBINED if combine else ARCHITECTURES:
+        factory = (ResidualMultiscaleCNN if architecture == "residual_multiscale"
+                   else partial(RefinedCNN, architecture=architecture))
         name, centered, shifted, model, params = evaluate(
-            5, x, meta, stress, shifted_inputs, model_factory=factory, name=architecture)
+            5, x, meta, stress, shifted_inputs, model_factory=factory, name=architecture,
+            diagnostics=diagnostics if combine else None)
         scores.append(summarize(name, centered, shifted, params))
         ordinary.append(centered)
         off_center.append(shifted)
@@ -114,6 +141,8 @@ def main(project, output, training_threads):
     timing = timing.rename(columns={"representation": "architecture"}).drop(columns="dropout")
     results = pd.DataFrame(scores).merge(timing, on="architecture", validate="one_to_one")
     write_results(output, results, ordinary, off_center)
+    if combine:
+        pd.DataFrame(diagnostics).to_csv(output / "train_test_gap.csv", index=False)
 
 
 if __name__ == "__main__":
@@ -121,5 +150,7 @@ if __name__ == "__main__":
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--training-threads", type=int, default=4)
+    parser.add_argument("--combine", action="store_true",
+                        help="Test one dilated regional head and one residual multiscale model")
     args = parser.parse_args()
-    main(args.project, args.output, args.training_threads)
+    main(args.project, args.output, args.training_threads, args.combine)

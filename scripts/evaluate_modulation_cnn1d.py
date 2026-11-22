@@ -76,7 +76,7 @@ def fit(x, meta, training, regions, epochs, seed, model_factory=SpectrumCNN):
     return state
 
 
-def evaluate(regions, x, meta, shifted, shifted_inputs, model_factory=SpectrumCNN, name=None):
+def evaluate(regions, x, meta, shifted, shifted_inputs, model_factory=SpectrumCNN, name=None, diagnostics=None):
     name = name or f"CNN1D_pool{regions}"
     centered_results, shifted_results, epochs = [], [], []
     classes = np.asarray(CLASS_NAMES)
@@ -88,8 +88,16 @@ def evaluate(regions, x, meta, shifted, shifted_inputs, model_factory=SpectrumCN
         assert train_groups.isdisjoint(set(meta.iloc[test_idx]["group"]) | set(shifted_test["group"]))
         best_epoch = choose_epochs(x, meta, train_idx, int(fold), regions, model_factory)
         state = fit(x, meta, train_idx, regions, best_epoch, SEED + int(fold), model_factory)
-        centered_results.append(meta.iloc[test_idx].assign(
-            architecture=name, best_epoch=best_epoch, predicted=classes[predict(state, test_idx)]))
+        centered = meta.iloc[test_idx].assign(
+            architecture=name, best_epoch=best_epoch, predicted=classes[predict(state, test_idx)])
+        centered_results.append(centered)
+        if diagnostics is not None:
+            train_f1 = f1_score(meta.iloc[train_idx]["label"], classes[predict(state, train_idx)],
+                                labels=CLASS_NAMES, average="macro")
+            test_f1 = f1_score(centered["label"], centered["predicted"], labels=CLASS_NAMES, average="macro")
+            diagnostics.append({"architecture": name, "fold": int(fold), "best_epoch": best_epoch,
+                                "train_macro_f1": train_f1, "test_macro_f1": test_f1,
+                                "train_test_gap": train_f1 - test_f1})
         if not shifted_test.empty:
             shifted_results.append(shifted_test.assign(
                 architecture=name, predicted=classes[predict_shifted(state, shifted_inputs[shifted_test.index])]))
