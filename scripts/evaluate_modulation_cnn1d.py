@@ -40,20 +40,20 @@ class SpectrumCNN(nn.Module):
         return self.layers(data.unsqueeze(1))
 
 
-def training_state(x, meta, indices, regions, seed):
+def training_state(x, meta, indices, regions, seed, model_factory=SpectrumCNN):
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
     mean = x[indices].mean()
     scale = max(x[indices].std(), np.float32(1e-6))
     inputs = torch.from_numpy((x - mean) / scale)
-    model = SpectrumCNN(regions)
+    model = model_factory(regions)
     optimizer = torch.optim.AdamW(model.parameters(), lr=.001, weight_decay=.0001)
     return model, optimizer, generator, inputs, targets(meta), sample_weights(meta.iloc[indices]), mean, scale
 
 
-def choose_epochs(x, meta, training, fold, regions):
+def choose_epochs(x, meta, training, fold, regions, model_factory=SpectrumCNN):
     inside, validation = validation_split(meta, training, fold)
-    state = training_state(x, meta, inside, regions, SEED + fold)
+    state = training_state(x, meta, inside, regions, SEED + fold, model_factory)
     actual = targets(meta).numpy()[validation]
     best_score, best_epoch = -float("inf"), 1
     for epoch in range(1, MAX_EPOCHS + 1):
@@ -69,15 +69,15 @@ def choose_epochs(x, meta, training, fold, regions):
     return best_epoch
 
 
-def fit(x, meta, training, regions, epochs, seed):
-    state = training_state(x, meta, training, regions, seed)
+def fit(x, meta, training, regions, epochs, seed, model_factory=SpectrumCNN):
+    state = training_state(x, meta, training, regions, seed, model_factory)
     for _ in range(epochs):
         train_epoch(state, training)
     return state
 
 
-def evaluate(regions, x, meta, shifted, shifted_inputs):
-    name = f"CNN1D_pool{regions}"
+def evaluate(regions, x, meta, shifted, shifted_inputs, model_factory=SpectrumCNN, name=None):
+    name = name or f"CNN1D_pool{regions}"
     centered_results, shifted_results, epochs = [], [], []
     classes = np.asarray(CLASS_NAMES)
     for fold in sorted(meta["fold"].unique()):
@@ -86,8 +86,8 @@ def evaluate(regions, x, meta, shifted, shifted_inputs):
         shifted_test = shifted.loc[shifted["fold"].eq(fold)]
         train_groups = set(meta.iloc[train_idx]["group"])
         assert train_groups.isdisjoint(set(meta.iloc[test_idx]["group"]) | set(shifted_test["group"]))
-        best_epoch = choose_epochs(x, meta, train_idx, int(fold), regions)
-        state = fit(x, meta, train_idx, regions, best_epoch, SEED + int(fold))
+        best_epoch = choose_epochs(x, meta, train_idx, int(fold), regions, model_factory)
+        state = fit(x, meta, train_idx, regions, best_epoch, SEED + int(fold), model_factory)
         centered_results.append(meta.iloc[test_idx].assign(
             architecture=name, best_epoch=best_epoch, predicted=classes[predict(state, test_idx)]))
         if not shifted_test.empty:
@@ -95,7 +95,7 @@ def evaluate(regions, x, meta, shifted, shifted_inputs):
                 architecture=name, predicted=classes[predict_shifted(state, shifted_inputs[shifted_test.index])]))
         epochs.append(best_epoch)
         print(f"{name} | fold {fold}: epoch {best_epoch}", flush=True)
-    final = fit(x, meta, np.arange(len(meta)), regions, int(np.median(epochs)), SEED)
+    final = fit(x, meta, np.arange(len(meta)), regions, int(np.median(epochs)), SEED, model_factory)
     unseen = shifted.loc[shifted["fold"].eq(0)]
     assert set(meta["group"]).isdisjoint(unseen["group"])
     if not unseen.empty:
