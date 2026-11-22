@@ -18,6 +18,7 @@ class SpectrumPlot(QWidget):
         self.stop = 108e6
         self.values: list[float | None] = [None] * 2048
         self.current: Spectrum | None = None
+        self.amplitude_unit = "DBM"
         self.setMinimumHeight(200 if panorama else 170)
         self.setMouseTracking(True)
         self.hover_text = ""
@@ -29,6 +30,9 @@ class SpectrumPlot(QWidget):
         self.update()
 
     def add(self, spectrum: Spectrum) -> None:
+        if self.amplitude_unit != spectrum.amplitude_unit:
+            self.values = [None] * 2048
+        self.amplitude_unit = spectrum.amplitude_unit
         if not self.panorama:
             self.current = spectrum
             self.start = spectrum.frequency_hz[0]
@@ -64,6 +68,11 @@ class SpectrumPlot(QWidget):
         painter.setPen(QColor("#7692aa"))
         painter.drawText(QRectF(self.width() - 160, 8, 140, 24), Qt.AlignmentFlag.AlignRight, self.hover_text)
         low, high = -110.0, -20.0
+        plotted = self.values if self.panorama else (self.current.mean_dbm if self.current else [])
+        finite = [v for v in plotted if v is not None and math.isfinite(v)]
+        if finite:
+            low = math.floor((min(finite) - 5) / 10) * 10
+            high = max(low + 30, math.ceil((max(finite) + 5) / 10) * 10)
         for n in range(7):
             x = area.left() + n * area.width() / 6
             painter.setPen(QPen(QColor("#24364a"), 1))
@@ -72,18 +81,19 @@ class SpectrumPlot(QWidget):
             frequency = (self.start + n * (self.stop - self.start) / 6) / 1e6
             painter.drawText(QRectF(x - 40, area.bottom() + 6, 80, 20), Qt.AlignmentFlag.AlignCenter,
                              f"{frequency:.3f}")
-        for level in (-110, -90, -70, -50, -30):
+        for level in (low + i * (high-low) / 5 for i in range(6)):
             y = area.bottom() - (level - low) / (high - low) * area.height()
             painter.setPen(QPen(QColor("#24364a"), 1))
             painter.drawLine(QPointF(area.left(), y), QPointF(area.right(), y))
             painter.setPen(QColor("#90a7be"))
-            painter.drawText(QRectF(5, y - 8, 48, 18), Qt.AlignmentFlag.AlignRight, str(level))
-        painter.drawText(QRectF(6, 25, 48, 18), "dBm")
+            painter.drawText(QRectF(5, y - 8, 48, 18), Qt.AlignmentFlag.AlignRight, f"{level:g}")
+        unit = {"DBM": "dBm", "DBUV": "dBµV", "DBMV": "dBmV", "DBUA": "dBµA", "DBPW": "dBpW"}[self.amplitude_unit]
+        painter.drawText(QRectF(6, 25, 48, 18), unit)
         painter.drawText(QRectF(self.width() - 55, 25, 45, 18), "МГц")
         points = self.values if self.panorama else (self.current.mean_dbm if self.current else [])
         if not points or all(v is None for v in points):
             painter.setPen(QColor("#70869c"))
-            painter.drawText(area, Qt.AlignmentFlag.AlignCenter, "Ожидание измерений · имитация")
+            painter.drawText(area, Qt.AlignmentFlag.AlignCenter, "Ожидание измерений")
             return
         path = QPainterPath()
         connected = False

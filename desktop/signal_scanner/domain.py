@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import math
 
@@ -24,11 +24,11 @@ class AnalyzerSettings:
             raise ValueError("Частота, span, RBW и VBW должны быть положительными числами.")
         if self.center_hz <= self.span_hz / 2:
             raise ValueError("Нижняя граница окна должна быть выше 0 Гц.")
-        if not 101 <= self.points <= 10001:
-            raise ValueError("Количество точек: от 101 до 10001.")
+        if not 101 <= self.points <= 32001:
+            raise ValueError("Количество точек: от 101 до 32001.")
         if self.rbw_hz > self.span_hz or self.vbw_hz > self.span_hz:
             raise ValueError("RBW и VBW не должны превышать span.")
-        if self.detector not in {"POS", "SAMPLE", "RMS"}:
+        if self.detector not in {"POS", "SAMPLE", "RMS", "NEG", "APE", "AVER", "QPE"}:
             raise ValueError("Неизвестный детектор.")
 
 
@@ -39,6 +39,36 @@ class Spectrum:
     sweeps_dbm: tuple[tuple[float, ...], ...]
     captured_at: str
     simulated: bool = True
+    measurement_metadata: dict = field(default_factory=dict)
+    # Legacy attribute names *_dbm are retained for existing callers. The unit
+    # is explicit, and hardware values are never silently converted.
+    amplitude_unit: str = "DBM"
+
+    def validate(self) -> None:
+        self.settings.validate()
+        if self.amplitude_unit not in {"DBM", "DBUV", "DBMV", "DBUA", "DBPW"}:
+            raise ValueError("Неподдерживаемая единица уровня.")
+        if type(self.simulated) is not bool:
+            raise ValueError("simulated must be an explicit boolean")
+        n = self.settings.points
+        if len(self.frequency_hz) != n or not self.sweeps_dbm:
+            raise ValueError("Число точек оси/настроек не совпало или нет срезов.")
+        if any(len(row) != n for row in self.sweeps_dbm):
+            raise ValueError("Число точек трассы не совпало с осью; обрезка запрещена.")
+        if not all(math.isfinite(v) for v in self.frequency_hz):
+            raise ValueError("Некорректная частотная ось.")
+        if not all(math.isfinite(v) for row in self.sweeps_dbm for v in row):
+            raise ValueError("Некорректные уровни трассы.")
+        minima = self.measurement_metadata.get("autopeak_min_sweeps")
+        if minima is not None and (len(minima) != len(self.sweeps_dbm)
+                                   or any(len(row) != n for row in minima)
+                                   or any(not math.isfinite(v) for row in minima for v in row)):
+            raise ValueError("Некорректный второй столбец AUTOPEAK.")
+        start = self.settings.center_hz - self.settings.span_hz / 2
+        step = self.settings.span_hz / (n - 1)
+        if any(not math.isclose(v, start + i * step, rel_tol=1e-9, abs_tol=1e-3)
+               for i, v in enumerate(self.frequency_hz)):
+            raise ValueError("Частотная ось не соответствует фактическим настройкам.")
 
     @property
     def mean_dbm(self) -> tuple[float, ...]:
@@ -56,6 +86,7 @@ class Detection:
     prominence_db: float
     modulation: str = "Неизвестно"
     origin: str = "Пороговый детектор; модель не подключена"
+    amplitude_unit: str = "DBM"
 
 
 @dataclass(frozen=True)
@@ -99,9 +130,24 @@ class CaptureLabels:
     comment: str = ""
     source_name: str = ""
     settings_source: str = "application"
+    observation_id: str = ""
+    session_id: str = ""
+    label_certainty: str = "certain"
+
+    @property
+    def signal_present(self) -> bool | None:
+        if self.label_certainty == "uncertain" or self.signal_count == "unknown":
+            return None
+        return self.signal_count != "none"
+
+    @property
+    def training_eligible(self) -> bool:
+        return self.signal_present is not None
 
     def validate(self) -> None:
-        if self.signal_count not in {"none", "one", "multiple"}:
+        if self.label_certainty not in {"certain", "uncertain"}:
+            raise ValueError("Неизвестный признак уверенности разметки.")
+        if self.signal_count not in {"none", "one", "multiple", "unknown"}:
             raise ValueError("Укажите количество сигналов.")
         if self.modulation not in {"AM", "FM", "mixed", "unknown", "none"}:
             raise ValueError("Укажите модуляцию.")

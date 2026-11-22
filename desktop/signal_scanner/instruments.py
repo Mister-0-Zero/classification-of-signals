@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import math
 import random
 import threading
@@ -15,6 +15,25 @@ class Cancelled(Exception):
 
 class Analyzer(ABC):
     """Single-owner device interface. Future transports must read actual settings."""
+
+    @property
+    @abstractmethod
+    def simulated(self) -> bool: ...
+
+    def snapshot_state(self):
+        return self.read_settings()
+
+    def restore_state(self, state) -> None:
+        self.apply_settings(state)
+
+    def series_snapshot(self):
+        raise NotImplementedError("Этот адаптер не поддерживает случайные серии.")
+
+    def apply_variant(self, variant, initial):
+        raise NotImplementedError("Этот адаптер не поддерживает случайные серии.")
+
+    def restore_series_state(self, state, *, spectral=True):
+        raise NotImplementedError("Этот адаптер не поддерживает случайные серии.")
 
     @abstractmethod
     def read_settings(self) -> AnalyzerSettings: ...
@@ -40,6 +59,8 @@ class DemoSignal:
 
 class Simulator(Analyzer):
     """Synthetic spectra, not a physical model or trained classifier."""
+
+    simulated = True
 
     def __init__(self, seed: int = 42, delay_scale: float = 1.0):
         self.settings = AnalyzerSettings()
@@ -68,6 +89,24 @@ class Simulator(Analyzer):
         settings.validate()
         self.settings = settings
         return settings
+
+    def series_snapshot(self):
+        return {"settings": asdict(self.settings),
+                "trace_mode": getattr(self, "series_trace_mode", "WRIT"),
+                "sweep_count": getattr(self, "series_sweep_count", 0)}
+
+    def apply_variant(self, variant, initial):
+        settings = AnalyzerSettings(**variant["settings"])
+        if (settings.center_hz, settings.span_hz, settings.points) != (initial.center_hz, initial.span_hz, initial.points):
+            raise ValueError("Серия не должна менять частотное окно или число точек.")
+        self.series_trace_mode = variant["trace_mode"]
+        self.series_sweep_count = variant["sweep_count"]
+        return self.apply_settings(settings)
+
+    def restore_series_state(self, state, *, spectral=True):
+        self.apply_settings(AnalyzerSettings(**state["settings"]))
+        self.series_trace_mode = state["trace_mode"]
+        self.series_sweep_count = state["sweep_count"]
 
     def set_scene(self, name: str) -> None:
         if name not in {"Эфир", "Нет сигнала", "Один AM", "Один FM", "Несколько", "Слабый сигнал"}:
@@ -128,6 +167,13 @@ class Simulator(Analyzer):
 
 
 def create_analyzer(transport: str, address: str, seed: int = 42) -> Analyzer:
-    if transport != "Имитация":
-        raise ValueError("В этой версии доступна только имитация. TCP и PyVISA будут подключены после проверки на приборе.")
-    return Simulator(seed)
+    if transport == "Имитация":
+        return Simulator(seed)
+    from .fsl import FslAnalyzer, SocketTransport
+    if not address.strip():
+        raise ValueError("Укажите текущий IP / VISA-адрес прибора.")
+    if transport == "TCP-сокет":
+        return FslAnalyzer(address, transport_factory=lambda: SocketTransport(address), diagnostics_only=True)
+    if transport in {"PyVISA", "PyVISA (системная VISA)"}:
+        return FslAnalyzer(address, backend="" if transport.endswith("VISA)") else "@py")
+    raise ValueError("Неизвестный способ подключения.")

@@ -7,6 +7,7 @@ class ThresholdDetector:
     """Noise-relative baseline. No ground-truth modulation or ML confidence is exposed."""
 
     def detect(self, spectrum: Spectrum, threshold_db: float = 8.0) -> list[Detection]:
+        spectrum.validate()
         y = spectrum.mean_dbm
         ordered = sorted(y)
         floor = ordered[int((len(ordered) - 1) * .2)]
@@ -29,5 +30,6 @@ class ThresholdDetector:
             results.append(Detection(
                 spectrum.frequency_hz[peak], spectrum.frequency_hz[first],
                 spectrum.frequency_hz[last], y[peak], y[peak] - floor,
+                amplitude_unit=spectrum.amplitude_unit,
             ))
         return results

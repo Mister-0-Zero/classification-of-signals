@@ -49,10 +49,14 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan(start_hz=1e6, stop_hz=1e12, settings=AnalyzerSettings(span_hz=1000, rbw_hz=100, vbw_hz=100)).windows()
 
-    def test_no_hardware_transport_can_connect(self):
-        for name in ('TCP-сокет', 'PyVISA'):
-            with self.assertRaisesRegex(ValueError, 'только имитация'):
-                create_analyzer(name, '127.0.0.1')
+    def test_hardware_constructor_has_no_network_side_effects(self):
+        from unittest.mock import patch
+        from signal_scanner.fsl import FslAnalyzer
+        with patch('socket.create_connection', side_effect=AssertionError('network forbidden')):
+            for name in ('TCP-сокет', 'PyVISA'):
+                self.assertIsInstance(create_analyzer(name, '127.0.0.1'), FslAnalyzer)
+                with self.assertRaises(ValueError):
+                    create_analyzer(name, '')
 
     def test_empty_scene_has_no_detection(self):
         self.analyzer.set_scene('Нет сигнала')

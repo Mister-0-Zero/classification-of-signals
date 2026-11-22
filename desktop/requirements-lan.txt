@@ -1,0 +1,3 @@
+# Optional LAN adapter; pure VXI-11 backend has a tested Local bridge.
+PyVISA==1.16.2
+PyVISA-py==0.8.1

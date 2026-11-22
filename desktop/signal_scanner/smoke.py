@@ -44,6 +44,7 @@ def main() -> int:
             if step == 0:
                 assert not window.scan_start_button.isEnabled()
                 window.nav.setCurrentRow(2)
+                window.transport.setCurrentText('Имитация')
                 window.connect_button.click()
                 assert window.analyzer is not None
                 window.analyzer.delay_scale = .05
@@ -66,14 +67,15 @@ def main() -> int:
                 window.nav.setCurrentRow(1)
                 window.scene.setCurrentText('Один FM')
                 window.variants_checkbox.setChecked(True)
+                window.variant_count.setValue(10)
                 window.capture_sweeps.setValue(2)
                 window.record_button.click()
                 assert window.job is not None
                 state['step'] = 2
             elif step == 2 and window.job is None:
-                assert len(list(Path(window.last_run, 'samples').glob('*.csv'))) == 3
+                assert len(list(Path(window.last_run, 'samples').glob('*.csv'))) == 12
                 window.grab().save(str(output / 'capture.png'))
-                state['passed'].append('capture, three variants, persistence')
+                state['passed'].append('capture, ten random variants, two baselines, persistence')
                 window.nav.setCurrentRow(2)
                 window.panel.center.setValue(89.5)
                 window.apply_front_panel()
@@ -100,10 +102,11 @@ def main() -> int:
                 window.nav.setCurrentRow(2)
                 window.connect_button.click()
                 window.transport.setCurrentText('TCP-сокет')
+                window.address.clear()  # validation only: never contact real hardware in smoke
                 window.connect_button.click()
                 assert window.analyzer is None and errors
-                assert 'имитация' in errors[-1]
-                state['passed'].append('real transport blocked without network')
+                assert 'адрес' in errors[-1]
+                state['passed'].append('empty hardware address rejected without network')
                 done()
         except Exception as error:
             done(f'{type(error).__name__}: {error}')
