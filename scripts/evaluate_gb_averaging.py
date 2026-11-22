@@ -80,25 +80,60 @@ def train(template, frame, names):
     return clone(template).fit(frame[names], frame["label"], sample_weight=weights / weights.mean())
 
 
+def predict_window(model, names, length, holdout):
+    return holdout[["recording", "label", "group", "fold", "end_sweep"]].assign(
+        window=length, predicted=model.predict(holdout[names]))
+
+
+def summarize(length, prediction):
+    actual, predicted = prediction["label"], prediction["predicted"]
+    matrix = confusion_matrix(actual, predicted, labels=CLASSES)
+    f1 = f1_score(actual, predicted, labels=CLASSES, average=None)
+    return {"window": length, "accuracy": accuracy_score(actual, predicted), "macro_f1": f1.mean(),
+            **dict(zip(["f1_am", "f1_fm", "f1_noise"], f1, strict=True)),
+            "signal_as_noise": int(matrix[:2, 2].sum()), "noise_as_signal": int(matrix[2, :2].sum()),
+            "n_spectra": len(prediction)}
+
+
 def evaluate(length, data, template, names):
     parts = []
     for fold, holdout in data.groupby("fold"):
         training = data.loc[data["fold"].ne(fold)]
         assert set(training["group"]).isdisjoint(holdout["group"])
         model = train(template, training, names)
-        parts.append(holdout[["recording", "label", "group", "fold", "end_sweep"]].assign(
-            window=length, predicted=model.predict(holdout[names])))
+        parts.append(predict_window(model, names, length, holdout))
     prediction = pd.concat(parts, ignore_index=True)
     assert len(prediction) == len(data) and not prediction.duplicated(["recording", "end_sweep"]).any()
-    actual, predicted = prediction["label"], prediction["predicted"]
-    matrix = confusion_matrix(actual, predicted, labels=CLASSES)
-    f1 = f1_score(actual, predicted, labels=CLASSES, average=None)
-    result = {"window": length, "accuracy": accuracy_score(actual, predicted), "macro_f1": f1.mean(),
-              **dict(zip(["f1_am", "f1_fm", "f1_noise"], f1, strict=True)),
-              "signal_as_noise": int(matrix[:2, 2].sum()), "noise_as_signal": int(matrix[2, :2].sum()),
-              "n_spectra": len(prediction)}
-    print(f"Window {length}: Macro F1 {f1.mean():.4f}", flush=True)
+    result = summarize(length, prediction)
+    print(f"Window {length}: Macro F1 {result['macro_f1']:.4f}", flush=True)
     return result, prediction, train(template, data, names)
+
+
+def evaluate_transfer_fold(fold, tables, template, names):
+    single = tables[1]
+    training = single.loc[single["fold"].ne(fold)]
+    model = train(template, training, names)
+    predictions = []
+    for length, cases in tables.items():
+        test = cases.loc[cases["fold"].eq(fold)]
+        assert set(training["group"]).isdisjoint(test["group"])
+        assert set(training["recording"]).isdisjoint(test["recording"])
+        predictions.append(predict_window(model, names, length, test))
+    print(f"Fold {fold}: one model trained, tested on all six windows", flush=True)
+    return pd.concat(predictions, ignore_index=True)
+
+
+def evaluate_transfer(tables, template, names, workers):
+    tasks = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for fold in sorted(tables[1]["fold"].unique()):
+            tasks.append(pool.submit(evaluate_transfer_fold, fold, tables, template, names))
+        predictions = pd.concat([task.result() for task in as_completed(tasks)], ignore_index=True)
+    assert len(predictions) == sum(map(len, tables.values()))
+    assert not predictions.duplicated(["window", "recording", "end_sweep"]).any()
+    scores = [summarize(int(length), group) for length, group in predictions.groupby("window")]
+    timed_model = train(template, tables[1], names)
+    return scores, [predictions], dict.fromkeys(WINDOWS, timed_model)
 
 
 def latency(recordings, models, extract_features, names):
@@ -132,7 +167,7 @@ def non_overlapping_scores(predictions):
     return pd.DataFrame(rows)
 
 
-def main(project, output, workers):
+def main(project, output, workers, train_single):
     sys.path.insert(0, str(project))
     from models.modulation.classifier import FEATURE_NAMES, extract_features
 
@@ -148,14 +183,17 @@ def main(project, output, workers):
     print(f"{len(records)} recordings x {50 - max(WINDOWS) + 1} matched windows", flush=True)
     scores, predictions, models = [], [], {}
     with threadpool_limits(limits=1):
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            pending = {pool.submit(evaluate, length, table, template, FEATURE_NAMES): length
-                       for length, table in tables.items()}
-            for future in as_completed(pending):
-                metrics, predicted, model = future.result()
-                scores.append(metrics)
-                predictions.append(predicted)
-                models[pending[future]] = model
+        if train_single:
+            scores, predictions, models = evaluate_transfer(tables, template, FEATURE_NAMES, workers)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                pending = {pool.submit(evaluate, length, table, template, FEATURE_NAMES): length
+                           for length, table in tables.items()}
+                for future in as_completed(pending):
+                    metrics, predicted, model = future.result()
+                    scores.append(metrics)
+                    predictions.append(predicted)
+                    models[pending[future]] = model
         timings = latency(records, models, extract_features, FEATURE_NAMES)
     results = pd.DataFrame(scores).merge(timings, on="window", validate="one_to_one").sort_values("window")
     results.to_csv(output / "scores.csv", index=False)
@@ -170,5 +208,7 @@ if __name__ == "__main__":
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=5)
+    parser.add_argument("--train-single", action="store_true",
+                        help="Train only on individual sweeps and test on all window lengths")
     args = parser.parse_args()
-    main(args.project, args.output, args.workers)
+    main(args.project, args.output, args.workers, args.train_single)
