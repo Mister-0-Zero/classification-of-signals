@@ -21,13 +21,14 @@ BATCH_SIZE = 128
 
 
 class ModulationMLP(nn.Sequential):
-    def __init__(self, width, dropout):
-        super().__init__(
-            nn.Linear(width, 32), nn.ReLU(),
-            nn.Linear(32, 16), nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(16, len(CLASS_NAMES)),
-        )
+    def __init__(self, width, dropout, hidden=(32, 16)):
+        layers = []
+        incoming = width
+        for size in hidden:
+            layers.extend((nn.Linear(incoming, size), nn.ReLU()))
+            incoming = size
+        layers.extend((nn.Dropout(dropout), nn.Linear(incoming, len(CLASS_NAMES))))
+        super().__init__(*layers)
 
 
 def raw_input(amplitude):
@@ -69,11 +70,11 @@ def targets(meta):
     return torch.from_numpy(meta["label"].map(mapping).to_numpy(dtype=np.int64, copy=True))
 
 
-def training_state(x, meta, indices, dropout, seed):
+def training_state(x, meta, indices, dropout, seed, hidden=(32, 16)):
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
     inputs, mean, scale = standardize(x, indices)
-    model = ModulationMLP(x.shape[1], dropout)
+    model = ModulationMLP(x.shape[1], dropout, hidden)
     optimizer = torch.optim.AdamW(model.parameters(), lr=.001, weight_decay=.0001)
     y = targets(meta)
     weights = sample_weights(meta.iloc[indices])
@@ -114,9 +115,9 @@ def validation_split(meta, training, fold):
     return inside, validation
 
 
-def choose_epochs(x, meta, training, fold, dropout):
+def choose_epochs(x, meta, training, fold, dropout, hidden=(32, 16)):
     inside, validation = validation_split(meta, training, fold)
-    state = training_state(x, meta, inside, dropout, SEED + fold)
+    state = training_state(x, meta, inside, dropout, SEED + fold, hidden)
     actual = targets(meta).numpy()[validation]
     best_score, best_epoch = -float("inf"), 1
     for epoch in range(1, MAX_EPOCHS + 1):
@@ -132,8 +133,8 @@ def choose_epochs(x, meta, training, fold, dropout):
     return best_epoch
 
 
-def fit(x, meta, training, dropout, epochs, seed):
-    state = training_state(x, meta, training, dropout, seed)
+def fit(x, meta, training, dropout, epochs, seed, hidden=(32, 16)):
+    state = training_state(x, meta, training, dropout, seed, hidden)
     for _ in range(epochs):
         train_epoch(state, training)
     return state
