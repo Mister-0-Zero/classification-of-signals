@@ -14,6 +14,8 @@ from evaluate_modulation_mlp import CLASS_NAMES, SEED, benchmark, choose_epochs,
 
 
 ARCHITECTURES = [(32, 16), (16, 16), (32, 32), (32, 32, 16)]
+WIDE_HIDDEN = (200, 20)
+DROPOUT_LEVELS = (0.0, 0.1, 0.25, 0.4)
 
 
 def predict_shifted(state, inputs):
@@ -23,7 +25,7 @@ def predict_shifted(state, inputs):
         return model(torch.from_numpy((inputs - mean) / scale)).argmax(dim=1).numpy()
 
 
-def evaluate_one(hidden, meta, inputs, stress_meta, stress_inputs):
+def evaluate_one(hidden, meta, inputs, stress_meta, stress_inputs, dropout=0.0):
     name = "-".join(map(str, (501, *hidden, 3)))
     centered, shifted, epochs = [], [], []
     class_array = np.asarray(CLASS_NAMES)
@@ -33,8 +35,8 @@ def evaluate_one(hidden, meta, inputs, stress_meta, stress_inputs):
         cases = stress_meta.loc[stress_meta["fold"].eq(fold)]
         train_groups = set(meta.iloc[train_idx]["group"])
         assert train_groups.isdisjoint(set(meta.iloc[test_idx]["group"]) | set(cases["group"]))
-        selected = choose_epochs(inputs, meta, train_idx, int(fold), 0.0, hidden)
-        state = fit(inputs, meta, train_idx, 0.0, selected, SEED + int(fold), hidden)
+        selected = choose_epochs(inputs, meta, train_idx, int(fold), dropout, hidden)
+        state = fit(inputs, meta, train_idx, dropout, selected, SEED + int(fold), hidden)
         centered.append(meta.iloc[test_idx].assign(
             architecture=name, best_epoch=selected, predicted=class_array[predict(state, test_idx)],
         ))
@@ -42,7 +44,7 @@ def evaluate_one(hidden, meta, inputs, stress_meta, stress_inputs):
             shifted.append(cases.assign(architecture=name, predicted=class_array[
                 predict_shifted(state, stress_inputs[cases.index])]))
         epochs.append(selected)
-    final = fit(inputs, meta, np.arange(len(meta)), 0.0, int(np.median(epochs)), SEED, hidden)
+    final = fit(inputs, meta, np.arange(len(meta)), dropout, int(np.median(epochs)), SEED, hidden)
     unseen = stress_meta.loc[stress_meta["fold"].eq(0)]
     assert set(meta["group"]).isdisjoint(unseen["group"])
     if not unseen.empty:
@@ -53,7 +55,8 @@ def evaluate_one(hidden, meta, inputs, stress_meta, stress_inputs):
     assert not centered.duplicated(["recording", "sweep_idx"]).any()
     assert not shifted.duplicated(["recording", "sweep_idx"]).any()
     parameters = sum(parameter.numel() for parameter in final[0].parameters())
-    print(f"{name}: {parameters} parameters, epoch range {min(epochs)}-{max(epochs)}", flush=True)
+    print(f"{name}, dropout {dropout:g}: {parameters} parameters, "
+          f"epoch range {min(epochs)}-{max(epochs)}", flush=True)
     return name, centered, shifted, final, parameters
 
 
@@ -73,7 +76,7 @@ def summarize(name, centered, shifted, parameters):
     return row
 
 
-def main(project, output):
+def main(project, output, wide_dropout=False):
     sys.path.insert(0, str(project))
     from models.modulation.classifier import FEATURE_NAMES, ModulationClassifier, extract_features
     from scripts.evaluate_gb_averaging import fold_mapping, load_recordings
@@ -93,21 +96,29 @@ def main(project, output):
     stress, stress_x = load_shifted(project)
     stress["fold"] = stress["group"].map(folds).fillna(0).astype(int)
     results, centered_predictions, shifted_predictions, models = [], [], [], {}
-    for architecture in ARCHITECTURES:
-        name, centered, shifted, state, parameters = evaluate_one(architecture, meta, x, stress, stress_x)
-        results.append(summarize(name, centered, shifted, parameters))
+    configurations = ([(WIDE_HIDDEN, value) for value in DROPOUT_LEVELS] if wide_dropout
+                      else [(hidden, 0.0) for hidden in ARCHITECTURES])
+    for architecture, dropout in configurations:
+        name, centered, shifted, state, parameters = evaluate_one(architecture, meta, x, stress, stress_x, dropout)
+        results.append(summarize(name, centered, shifted, parameters) | {"dropout": dropout})
+        if wide_dropout:
+            centered = centered.assign(dropout=dropout)
+            shifted = shifted.assign(dropout=dropout)
         centered_predictions.append(centered)
         shifted_predictions.append(shifted)
-        models[(name, 0.0)] = state
+        models[(name, dropout)] = state
     timing = benchmark(recordings, models, extract_features, FEATURE_NAMES, ModulationClassifier()._model)
-    timing = timing.rename(columns={"representation": "architecture"}).drop(columns="dropout")
-    scores = pd.DataFrame(results).merge(timing, on="architecture", validate="one_to_one")
+    timing = timing.rename(columns={"representation": "architecture"})
+    scores = pd.DataFrame(results).merge(timing, on=["architecture", "dropout"], validate="one_to_one")
+    if not wide_dropout:
+        scores = scores.drop(columns="dropout")
     scores.to_csv(output / "scores.csv", index=False)
     centered = pd.concat(centered_predictions, ignore_index=True)
     shifted = pd.concat(shifted_predictions, ignore_index=True)
     centered.to_csv(output / "centered_predictions.csv", index=False, encoding="utf-8-sig")
     shifted.to_csv(output / "shifted_predictions.csv", index=False, encoding="utf-8-sig")
-    metrics_per_recording(shifted, ["architecture", "span_khz", "group"]).to_csv(
+    grouping = ["architecture"] + (["dropout"] if wide_dropout else []) + ["span_khz", "group"]
+    metrics_per_recording(shifted, grouping).to_csv(
         output / "shifted_by_station.csv", index=False, encoding="utf-8-sig")
     print(scores.round(5).to_string(index=False))
 
@@ -116,5 +127,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--wide-dropout", action="store_true",
+                        help="Compare dropout levels for the 501-200-20-3 network")
     args = parser.parse_args()
-    main(args.project, args.output)
+    main(args.project, args.output, args.wide_dropout)
