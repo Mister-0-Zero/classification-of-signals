@@ -170,12 +170,16 @@ def evaluate(mode, train_x, test_x, meta, offcenter):
 
 
 def scores(mode, centered, shifted, params):
-    actual, pred = centered["label"], centered["predicted"]
+    combined = pd.concat([centered, shifted], ignore_index=True)
+    actual, pred = combined["label"], combined["predicted"]
     matrix = confusion_matrix(actual, pred, labels=CLASS_NAMES)
     f1 = f1_score(actual, pred, labels=CLASS_NAMES, average=None)
     out = {"model": mode, "parameters": params, "accuracy": accuracy_score(actual, pred), "macro_f1": f1.mean(),
            **dict(zip(["f1_am", "f1_fm", "f1_noise"], f1, strict=True)),
            "signal_as_noise": int(matrix[:2, 2].sum()), "noise_as_signal": int(matrix[2, :2].sum())}
+    for suffix, part in [("all", combined), ("centered", centered)]:
+        fm = part.loc[part["label"].eq("FM"), "predicted"]
+        out |= {f"fm_correct_{suffix}": int(fm.eq("FM").sum()), f"fm_n_{suffix}": len(fm)}
     for span, part in [("all", shifted), *shifted.groupby("span_khz")]:
         suffix = str(int(span)) if span != "all" else span
         correct = int(part["predicted"].eq("FM").sum())
