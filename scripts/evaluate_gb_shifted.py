@@ -39,7 +39,7 @@ def feature_table(records, folds, length, first_endpoint, extract_features, esti
     return pd.DataFrame(rows)
 
 
-def evaluate_fold(fold, training, centered, shifted, length, template, names):
+def evaluate_fold(fold, training, centered, shifted, length, template, names, probabilities=False):
     fit_rows = training.loc[training["fold"].ne(fold)]
     model = train(template, fit_rows, names)
     tests = pd.concat([centered.loc[centered["fold"].eq(fold)].assign(shifted=False),
@@ -47,11 +47,14 @@ def evaluate_fold(fold, training, centered, shifted, length, template, names):
     assert set(fit_rows["group"]).isdisjoint(tests["group"])
     assert set(fit_rows["recording"]).isdisjoint(tests["recording"])
     predictions = predict_window(model, names, length, tests)
+    if probabilities:
+        for label, values in zip(model.classes_, model.predict_proba(tests[names]).T, strict=True):
+            predictions[f"p_{label.lower()}"] = values
     return predictions.assign(shifted=tests["shifted"], span_khz=tests["span_khz"])
 
 
-def evaluate(name, training, centered, shifted, length, template, names, pool):
-    futures = [pool.submit(evaluate_fold, fold, training, centered, shifted, length, template, names)
+def evaluate(name, training, centered, shifted, length, template, names, pool, probabilities=False):
+    futures = [pool.submit(evaluate_fold, fold, training, centered, shifted, length, template, names, probabilities)
                for fold in sorted(set(centered["fold"]) | set(shifted["fold"]))]
     predictions = pd.concat([future.result() for future in futures], ignore_index=True)
     assert len(predictions) == len(centered) + len(shifted)
