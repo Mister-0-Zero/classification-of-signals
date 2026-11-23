@@ -43,11 +43,16 @@ class WindowClassifier(nn.Module):
     def __init__(self, mode):
         super().__init__()
         self.mode = mode
-        self.encoder = Encoder()
-        self.output = nn.Linear(64, len(CLASS_NAMES))
+        if mode == "mlp_mean_spectrum":
+            self.encoder = nn.Sequential(nn.Linear(501, 200), nn.ReLU(), nn.Linear(200, 20),
+                                         nn.ReLU(), nn.Dropout(.1))
+            self.output = nn.Linear(20, len(CLASS_NAMES))
+        else:
+            self.encoder = Encoder()
+            self.output = nn.Linear(64, len(CLASS_NAMES))
 
     def forward(self, series):
-        encoded = self.encoder(series.flatten(0, 1)).reshape(series.shape[0], series.shape[1], 64)
+        encoded = self.encoder(series.flatten(0, 1)).unflatten(0, series.shape[:2])
         if self.mode == "deep_sets":
             # Share the representation of each sweep between overlapping windows.
             encoded = encoded.unfold(1, WINDOW, 1)[:, FIRST_WINDOW:].mean(dim=-1)
@@ -83,13 +88,21 @@ def training_state(mode, inputs, meta, indices, seed):
     return model, optimizer, generator, data, targets(meta), sample_weights(meta.iloc[indices]), mean, scale
 
 
-def train_epoch(state, indices):
+def train_epoch(state, indices, augmented=None, augmentation_rng=None):
     model, optimizer, generator, data, labels, weights, _, _ = state
     model.train()
+    shifted = {} if augmented is None else {
+        index: augmented[index][augmentation_rng.integers(len(augmented[index]))]
+        for index in indices if index in augmented and augmentation_rng.random() < .5
+    }
     for local in torch.randperm(len(indices), generator=generator).split(BATCH_RECORDINGS):
         batch = indices[local.numpy()]
+        values = data[batch]
+        for position, index in enumerate(batch):
+            if index in shifted:
+                values[position] = (shifted[index] - state[-2]) / state[-1]
         optimizer.zero_grad(set_to_none=True)
-        logits = model(data[batch])
+        logits = model(values)
         expected = labels[batch, None].expand(-1, logits.shape[1])
         loss = nn.functional.cross_entropy(logits.flatten(0, 1), expected.reshape(-1), reduction="none")
         loss = loss.reshape(len(batch), -1).mean(dim=1)
@@ -106,13 +119,14 @@ def predict(state, records):
                                for batch in records.split(BATCH_RECORDINGS)], axis=0)
 
 
-def choose_epochs(mode, inputs, meta, training, fold):
+def choose_epochs(mode, inputs, meta, training, fold, augmented=None):
     inside, validation = validation_split(meta, training, fold)
     state = training_state(mode, inputs, meta, inside, SEED + fold)
     actual = np.repeat(targets(meta).numpy()[validation], len(ENDPOINTS))
     best_score, best_epoch = -float("inf"), 1
+    augmentation_rng = np.random.default_rng(SEED + fold)
     for epoch in range(1, MAX_EPOCHS + 1):
-        train_epoch(state, inside)
+        train_epoch(state, inside, augmented, augmentation_rng)
         predicted = predict(state, state[3][validation]).reshape(-1)
         macro = f1_score(actual, predicted, labels=[0, 1, 2], average="macro")
         missed = ((actual != 2) & (predicted == 2)).sum() / (actual != 2).sum()
@@ -124,10 +138,11 @@ def choose_epochs(mode, inputs, meta, training, fold):
     return best_epoch
 
 
-def fit(mode, inputs, meta, training, epochs, seed):
+def fit(mode, inputs, meta, training, epochs, seed, augmented=None):
     state = training_state(mode, inputs, meta, training, seed)
+    augmentation_rng = np.random.default_rng(seed)
     for _ in range(epochs):
-        train_epoch(state, training)
+        train_epoch(state, training, augmented, augmentation_rng)
     return state
 
 
@@ -142,7 +157,7 @@ def predict_shifted(state, data):
     return predict(state, torch.from_numpy((data - state[-2]) / state[-1]))
 
 
-def evaluate(mode, train_x, test_x, meta, offcenter):
+def evaluate(mode, train_x, test_x, meta, offcenter, augmented=None):
     ordinary, shifted, epochs = [], [], []
     for fold in sorted(meta["fold"].unique()):
         train = np.flatnonzero(meta["fold"].ne(fold))
@@ -150,14 +165,14 @@ def evaluate(mode, train_x, test_x, meta, offcenter):
         stress = np.flatnonzero(offcenter["fold"].eq(fold))
         assert set(meta.iloc[train]["group"]).isdisjoint(set(meta.iloc[held]["group"]) |
                                                        set(offcenter.iloc[stress]["group"]))
-        epoch = choose_epochs(mode, train_x, meta, train, int(fold))
-        state = fit(mode, train_x, meta, train, epoch, SEED + int(fold))
+        epoch = choose_epochs(mode, train_x, meta, train, int(fold), augmented)
+        state = fit(mode, train_x, meta, train, epoch, SEED + int(fold), augmented)
         ordinary.append(attach(meta.iloc[held], predict(state, state[3][held]), mode))
         if stress.size:
             shifted.append(attach(offcenter.iloc[stress], predict_shifted(state, test_x[stress]), mode))
         epochs.append(epoch)
         print(f"{mode} | fold {fold}: selected epoch {epoch}", flush=True)
-    final = fit(mode, train_x, meta, np.arange(len(meta)), int(np.median(epochs)), SEED)
+    final = fit(mode, train_x, meta, np.arange(len(meta)), int(np.median(epochs)), SEED, augmented)
     unseen = np.flatnonzero(offcenter["fold"].eq(0))
     assert set(meta["group"]).isdisjoint(offcenter.iloc[unseen]["group"])
     if unseen.size:
@@ -198,7 +213,7 @@ def latency(raw, models, average_dbm):
     with torch.inference_mode():
         for repeat in range(4):
             for i in rng.permutation(len(windows)):
-                for mode in rng.permutation(MODES):
+                for mode in rng.permutation(list(models)):
                     model, _, _, _, _, _, mean, scale = models[mode]
                     start = perf_counter_ns()
                     x = windows[i] if mode == "deep_sets" else average_dbm(windows[i])[None, :]

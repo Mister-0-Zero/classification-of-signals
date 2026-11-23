@@ -27,13 +27,14 @@ def load_shifted_recordings(project):
     return records
 
 
-def feature_table(records, folds, length, first_endpoint, extract_features):
+def feature_table(records, folds, length, first_endpoint, extract_features, estimate_center=None):
     rows = []
     for info, axis, traces, center in records:
         fold = folds.get(info["group"], 0)
         for end in range(first_endpoint, len(traces)):
             spectrum = average_dbm(traces[end - length + 1:end + 1])
-            features = extract_features(axis, spectrum, center)
+            candidate = center if estimate_center is None else estimate_center(axis, spectrum, center)
+            features = extract_features(axis, spectrum, candidate)
             rows.append(info | {"fold": fold, "end_sweep": end} | features)
     return pd.DataFrame(rows)
 
