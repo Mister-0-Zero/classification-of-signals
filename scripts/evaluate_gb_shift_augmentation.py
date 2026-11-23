@@ -1,4 +1,4 @@
-"""Compare GB training with synthetic frequency shifts on real held-out FM."""
+"""Compare GB training with random frequency shifts on real held-out FM."""
 
 import argparse
 import sys
@@ -14,7 +14,8 @@ from evaluate_gb_averaging import average_dbm, fold_mapping, load_recordings, su
 from evaluate_gb_shifted import evaluate, feature_table, load_shifted_recordings
 
 
-GEOMETRIES_KHZ = ((250, -80), (250, 80), (400, -180), (400, 180))
+SHIFT_LIMITS_KHZ = ((250, 80), (400, 180))
+AUGMENTATION_SEED = 20261123
 FIRST_ENDPOINT = 9
 WINDOW = 7
 EDGE_WIDTH = 25
@@ -44,20 +45,28 @@ def synthesize(axis, averaged_dbm, center, span_khz, shift_khz):
     return target + center, top + 10 * np.log10(sampled)
 
 
-def augmented_features(recordings, folds, extract_features):
+def shift_geometries(rng):
+    for span, limit in SHIFT_LIMITS_KHZ:
+        left, right = rng.uniform(0, limit, size=2)
+        yield span, -left
+        yield span, right
+
+
+def augmented_features(recordings, folds, extract_features, seed):
+    rng = np.random.default_rng(seed)
     rows = []
     for info, axis, traces, center in recordings:
         metadata = info | {"fold": folds[info["group"]]}
         for end in range(FIRST_ENDPOINT, len(traces)):
             spectrum = average_dbm(traces[end - WINDOW + 1:end + 1])
-            for span, offset in GEOMETRIES_KHZ:
+            for span, offset in shift_geometries(rng):
                 frequencies, levels = synthesize(axis, spectrum, center, span, offset)
                 features = extract_features(frequencies, levels, center)
                 rows.append(metadata | {"end_sweep": end, "span_khz": span, "offset_khz": offset} | features)
     return pd.DataFrame(rows)
 
 
-def main(project, output, workers):
+def main(project, output, workers, seed):
     sys.path.insert(0, str(project))
     from models.modulation.classifier import FEATURE_NAMES, extract_features
 
@@ -66,8 +75,9 @@ def main(project, output, workers):
     folds = fold_mapping(records)
     centered = feature_table(records, folds, WINDOW, FIRST_ENDPOINT, extract_features)
     shifted = feature_table(load_shifted_recordings(project), folds, WINDOW, FIRST_ENDPOINT, extract_features)
-    synthetic = augmented_features(records, folds, extract_features)
-    assert (len(centered), len(shifted), len(synthetic)) == (3977, 615, 3977 * len(GEOMETRIES_KHZ))
+    synthetic = augmented_features(records, folds, extract_features, seed)
+    assert (len(centered), len(shifted)) == (3977, 615)
+    assert len(synthetic) == len(centered) * 2 * len(SHIFT_LIMITS_KHZ)
     assert shifted["label"].eq("FM").all()
     scenarios = [
         ("baseline", centered.iloc[:0]),
@@ -82,7 +92,7 @@ def main(project, output, workers):
             central_score = summarize(WINDOW, predicted.loc[~predicted["shifted"]])
             score.update(macro_f1_centered=central_score["macro_f1"],
                          signal_as_noise_centered=central_score["signal_as_noise"],
-                         synthetic_windows=len(additions))
+                         synthetic_windows=len(additions), augmentation_seed=seed)
             scores.append(score)
             predictions.append(predicted)
     output.mkdir(parents=True, exist_ok=True)
@@ -95,5 +105,6 @@ if __name__ == "__main__":
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=AUGMENTATION_SEED)
     args = parser.parse_args()
-    main(args.project.resolve(), args.output, args.workers)
+    main(args.project.resolve(), args.output, args.workers, args.seed)
