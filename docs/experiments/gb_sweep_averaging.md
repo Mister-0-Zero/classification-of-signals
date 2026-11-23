@@ -32,7 +32,7 @@
 ## Воспроизведение
 
 Из корня репозитория с локальными измерениями в `data/` и зависимостями
-[итоговой модели](../models/modulation/README.md):
+[итоговой модели](../../models/modulation/README.md):
 
 ```powershell
 python scripts/evaluate_gb_averaging.py --project . --output .local/gb_sweep_averaging
