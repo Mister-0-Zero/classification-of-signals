@@ -10,7 +10,7 @@ import torch
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
 from evaluate_mlp_shifted import load_shifted, metrics_per_recording
-from evaluate_modulation_mlp import CLASS_NAMES, SEED, benchmark, choose_epochs, fit, predict, raw_input
+from evaluate_modulation_mlp import CLASS_NAMES, SEED, benchmark, choose_epochs, fit, raw_input
 
 
 ARCHITECTURES = [(32, 16), (16, 16), (32, 32), (32, 32, 16)]
@@ -25,31 +25,41 @@ def predict_shifted(state, inputs):
         return model(torch.from_numpy((inputs - mean) / scale)).argmax(dim=1).numpy()
 
 
-def evaluate_one(hidden, meta, inputs, stress_meta, stress_inputs, dropout=0.0):
+def prediction_rows(rows, state, inputs, architecture, probabilities):
+    model, _, _, _, _, _, mean, scale = state
+    model.eval()
+    with torch.inference_mode():
+        logits = model(torch.from_numpy((inputs - mean) / scale))
+        result = rows.assign(architecture=architecture, predicted=np.asarray(CLASS_NAMES)[logits.argmax(dim=1).numpy()])
+        if probabilities:
+            result = result.assign(**{f"p_{label.lower()}": values for label, values in
+                                      zip(CLASS_NAMES, logits.softmax(dim=1).numpy().T, strict=True)})
+    return result
+
+
+def evaluate_one(hidden, meta, inputs, stress_meta, stress_inputs, dropout=0.0, *,
+                 probabilities=False, augment=None, signal_penalty=0.0):
     name = "-".join(map(str, (501, *hidden, 3)))
     centered, shifted, epochs = [], [], []
-    class_array = np.asarray(CLASS_NAMES)
+    options = {"augment": augment, "signal_penalty": signal_penalty}
     for fold in sorted(meta["fold"].unique()):
         train_idx = np.flatnonzero(meta["fold"].ne(fold))
         test_idx = np.flatnonzero(meta["fold"].eq(fold))
         cases = stress_meta.loc[stress_meta["fold"].eq(fold)]
         train_groups = set(meta.iloc[train_idx]["group"])
         assert train_groups.isdisjoint(set(meta.iloc[test_idx]["group"]) | set(cases["group"]))
-        selected = choose_epochs(inputs, meta, train_idx, int(fold), dropout, hidden)
-        state = fit(inputs, meta, train_idx, dropout, selected, SEED + int(fold), hidden)
-        centered.append(meta.iloc[test_idx].assign(
-            architecture=name, best_epoch=selected, predicted=class_array[predict(state, test_idx)],
-        ))
+        selected = choose_epochs(inputs, meta, train_idx, int(fold), dropout, hidden, **options)
+        state = fit(inputs, meta, train_idx, dropout, selected, SEED + int(fold), hidden, **options)
+        centered.append(prediction_rows(meta.iloc[test_idx], state, inputs[test_idx], name, probabilities)
+                        .assign(best_epoch=selected))
         if not cases.empty:
-            shifted.append(cases.assign(architecture=name, predicted=class_array[
-                predict_shifted(state, stress_inputs[cases.index])]))
+            shifted.append(prediction_rows(cases, state, stress_inputs[cases.index], name, probabilities))
         epochs.append(selected)
-    final = fit(inputs, meta, np.arange(len(meta)), dropout, int(np.median(epochs)), SEED, hidden)
+    final = fit(inputs, meta, np.arange(len(meta)), dropout, int(np.median(epochs)), SEED, hidden, **options)
     unseen = stress_meta.loc[stress_meta["fold"].eq(0)]
     assert set(meta["group"]).isdisjoint(unseen["group"])
     if not unseen.empty:
-        shifted.append(unseen.assign(architecture=name, predicted=class_array[
-            predict_shifted(final, stress_inputs[unseen.index])]))
+        shifted.append(prediction_rows(unseen, final, stress_inputs[unseen.index], name, probabilities))
     centered, shifted = pd.concat(centered, ignore_index=True), pd.concat(shifted, ignore_index=True)
     assert (len(centered), len(shifted)) == (4850, 750)
     assert not centered.duplicated(["recording", "sweep_idx"]).any()

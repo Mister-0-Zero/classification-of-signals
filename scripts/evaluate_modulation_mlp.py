@@ -81,13 +81,20 @@ def training_state(x, meta, indices, dropout, seed, hidden=(32, 16)):
     return model, optimizer, generator, inputs, y, weights, mean, scale
 
 
-def train_epoch(state, indices):
-    model, optimizer, generator, x, y, weights, _, _ = state
+def train_epoch(state, indices, augment=None, rng=None, signal_penalty=0.0):
+    model, optimizer, generator, x, y, weights, mean, scale = state
     model.train()
     for local in torch.randperm(len(indices), generator=generator).split(BATCH_SIZE):
         batch = indices[local.numpy()]
         optimizer.zero_grad(set_to_none=True)
-        losses = nn.functional.cross_entropy(model(x[batch]), y[batch], reduction="none")
+        values = x[batch]
+        if augment is not None:
+            augment(values, batch, mean, scale, rng)
+        logits = model(values)
+        losses = nn.functional.cross_entropy(logits, y[batch], reduction="none")
+        if signal_penalty:
+            signal = y[batch].ne(CLASS_NAMES.index("Noise"))
+            losses = losses + signal_penalty * logits.softmax(dim=1)[:, 2] * signal
         loss = (losses * weights[local]).sum() / weights[local].sum()
         loss.backward()
         optimizer.step()
@@ -115,13 +122,14 @@ def validation_split(meta, training, fold):
     return inside, validation
 
 
-def choose_epochs(x, meta, training, fold, dropout, hidden=(32, 16)):
+def choose_epochs(x, meta, training, fold, dropout, hidden=(32, 16), *, augment=None, signal_penalty=0.0):
     inside, validation = validation_split(meta, training, fold)
     state = training_state(x, meta, inside, dropout, SEED + fold, hidden)
     actual = targets(meta).numpy()[validation]
     best_score, best_epoch = -float("inf"), 1
+    rng = np.random.default_rng(SEED + fold) if augment is not None else None
     for epoch in range(1, MAX_EPOCHS + 1):
-        train_epoch(state, inside)
+        train_epoch(state, inside, augment, rng, signal_penalty)
         estimated = predict(state, validation)
         macro = f1_score(actual, estimated, labels=[0, 1, 2], average="macro")
         missed = ((actual != 2) & (estimated == 2)).sum() / (actual != 2).sum()
@@ -133,10 +141,11 @@ def choose_epochs(x, meta, training, fold, dropout, hidden=(32, 16)):
     return best_epoch
 
 
-def fit(x, meta, training, dropout, epochs, seed, hidden=(32, 16)):
+def fit(x, meta, training, dropout, epochs, seed, hidden=(32, 16), *, augment=None, signal_penalty=0.0):
     state = training_state(x, meta, training, dropout, seed, hidden)
+    rng = np.random.default_rng(seed) if augment is not None else None
     for _ in range(epochs):
-        train_epoch(state, training)
+        train_epoch(state, training, augment, rng, signal_penalty)
     return state
 
 
