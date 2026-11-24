@@ -1,2 +1,2 @@
-# Desktop application only; research dependencies and models are not bundled.
+-r ../models/modulation/requirements.txt
 PySide6-Essentials==6.12.0

@@ -16,6 +16,8 @@ class Cancelled(Exception):
 class Analyzer(ABC):
     """Single-owner device interface. Future transports must read actual settings."""
 
+    frequency_limits_hz = (0.0, math.inf)
+
     @property
     @abstractmethod
     def simulated(self) -> bool: ...

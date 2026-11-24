@@ -85,7 +85,7 @@ class Detection:
     peak_dbm: float
     prominence_db: float
     modulation: str = "Неизвестно"
-    origin: str = "Пороговый детектор; модель не подключена"
+    origin: str = "Пороговый детектор; только обзор"
     amplitude_unit: str = "DBM"
 
 
@@ -100,7 +100,11 @@ class ScanPlan:
     sweeps: int = 2
     threshold_db: float = 8.0
 
+    classification_mode: str = "fast"
+
     def windows(self) -> tuple[tuple[float, float], ...]:
+        if self.classification_mode not in {"fast", "quality"}:
+            raise ValueError("Неизвестный режим классификации")
         if not (math.isfinite(self.start_hz) and math.isfinite(self.stop_hz)
                 and 0 < self.start_hz < self.stop_hz):
             raise ValueError("Начальная частота должна быть положительной и меньше конечной.")

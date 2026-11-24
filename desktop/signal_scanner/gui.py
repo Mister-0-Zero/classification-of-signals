@@ -214,7 +214,7 @@ class MainWindow(QMainWindow):
         self.connection_badge.setObjectName("badge")
         header.addWidget(self.connection_badge)
         main.addLayout(header)
-        banner = QLabel("SignalScope · Пороговый детектор. Модуль классификации не подключён. Тип источника указан во вкладке «Подключение».")
+        banner = QLabel("SignalScope · Пороговый детектор. Классификация АМ, ЧМ и шума при уточнении. Тип источника указан во вкладке «Подключение».")
         banner.setObjectName("banner")
         banner.setWordWrap(True)
         main.addWidget(banner)
@@ -261,6 +261,8 @@ class MainWindow(QMainWindow):
         self.profile.currentTextChanged.connect(self._preset_changed)
         self.scan_mode = combo(["Однократный", "Непрерывный"])
         self.scan_depth = combo(["Обзор с уточнением", "Только обзор"])
+        self.classification = combo(["Быстрый · 1 развёртка", "Основной · 7 развёрток"])
+        self.scan_depth.currentIndexChanged.connect(self.classification.setDisabled)
         self.scan_sweeps = QSpinBox()
         self.scan_sweeps.setRange(1, 50)
         self.scan_sweeps.setValue(2)
@@ -268,7 +270,7 @@ class MainWindow(QMainWindow):
         self.threshold = number(8, 1, 40, 1)
         for label, widget in [("От, МГц", self.scan_start), ("До, МГц", self.scan_stop),
                               ("Профиль", self.profile), ("Проход", self.scan_mode),
-                              ("Обработка", self.scan_depth), ("Срезов / окно", self.scan_sweeps),
+                              ("Обработка", self.scan_depth), ("Классификация", self.classification), ("Срезов обзора", self.scan_sweeps),
                               ("Перекрытие, %", self.overlap), ("Порог, дБ", self.threshold)]:
             form.addRow(label, widget)
         self.threshold.setToolTip("Минимальное превышение над оценкой шумового фона, дБ")
@@ -609,7 +611,8 @@ class MainWindow(QMainWindow):
                             self.scan_settings.settings(), self.overlap.value() / 100,
                             self.scan_mode.currentText() == "Непрерывный",
                             self.scan_depth.currentText() == "Обзор с уточнением",
-                            self.scan_sweeps.value(), self.threshold.value())
+                            self.scan_sweeps.value(), self.threshold.value(),
+                            "fast" if self.classification.currentIndex() == 0 else "quality")
             plan.windows()
             repository = self.repository()
             save_log, save_raw = self.log_checkbox.isChecked(), self.raw_checkbox.isChecked()

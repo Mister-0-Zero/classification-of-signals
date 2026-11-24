@@ -132,6 +132,7 @@ class VisaTransport:
 
 class FslAnalyzer(Analyzer):
     simulated = False
+    frequency_limits_hz = (9000, 3e9)
 
     # Query every essential field; a missing/unsupported response rejects acquisition.
     QUERIES = {
@@ -304,7 +305,8 @@ class FslAnalyzer(Analyzer):
         if self.diagnostics_only:
             raise ValueError("Прямой TCP доступен только для чтения настроек; для записи выберите PyVISA.")
         settings.validate()
-        if settings.center_hz - settings.span_hz / 2 < 9000 or settings.center_hz + settings.span_hz / 2 > 3e9:
+        lower, upper = self.frequency_limits_hz
+        if settings.center_hz - settings.span_hz / 2 < lower or settings.center_hz + settings.span_hz / 2 > upper:
             raise ValueError("Окно должно лежать в диапазоне FSL-3: 9 кГц–3 ГГц.")
         with self.session() as transport:
             self.validate_capture(self.metadata(transport))

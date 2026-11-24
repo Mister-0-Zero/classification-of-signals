@@ -49,7 +49,7 @@ class FindingRegistry:
         for row in self.rows:
             row["status"] = "Ожидает проверки"
 
-    def observe(self, finding: Detection, pass_number: int, refined: bool, *, simulated: bool = True) -> None:
+    def observe(self, finding: Detection, pass_number: int, refined: bool, *, simulated: bool = True) -> int:
         match = None
         for row in self.rows:
             distance = abs(row["center_hz"] - finding.center_hz)
@@ -61,9 +61,13 @@ class FindingRegistry:
         if match is None:
             match = {"id": len(self.rows) + 1, "first_seen": utc_now(), "observations": 0}
             self.rows.append(match)
+        if not refined and match.get("last_pass") == pass_number and match.get("refined"):
+            return match["id"]
         match.update(asdict(finding), last_seen=utc_now(), last_pass=pass_number,
-                     status="Обнаружен", refined=refined or match.get("refined", False),
+                     status="Обнаружен", refined=refined,
                      observations=match["observations"] + 1, simulated=simulated)
+
+        return match["id"]
 
     def finish_pass(self, pass_number: int) -> None:
         for row in self.rows:
@@ -78,7 +82,11 @@ def scan(analyzer: Analyzer, plan: ScanPlan, repository: Repository,
          control: Control, emit: Callable[[dict], None], *, save_log: bool = True,
          save_raw: bool = False) -> None:
     windows = plan.windows()
-    initial = analyzer.read_settings()
+    classifier = None
+    if plan.refine:
+        from models.modulation.scanner import ScannerClassifier
+        classifier = ScannerClassifier(plan.classification_mode)
+    analyzer.read_settings()
     initial_state = analyzer.snapshot_state()
     detector = ThresholdDetector()
     registry = FindingRegistry()
@@ -86,7 +94,7 @@ def scan(analyzer: Analyzer, plan: ScanPlan, repository: Repository,
     run = repository.new_session("scans", simulated=analyzer.simulated) if save_log or save_raw else None
     summary = {"schema_version": 2, "simulated": analyzer.simulated, "status": "running",
                "started_at": utc_now(), "plan": asdict(plan),
-               "algorithm": "ThresholdDetector", "model": None,
+               "algorithm": "ThresholdDetector", "model": plan.classification_mode if plan.refine else None,
                "save_log": save_log, "save_raw": save_raw}
     operation_error = None
     captures = 0
@@ -105,7 +113,7 @@ def scan(analyzer: Analyzer, plan: ScanPlan, repository: Repository,
                 analyzer.pass_number = pass_number
             emit({"type": "pass_start", "pass": pass_number, "rows": registry.snapshot(),
                   "total": len(windows), "run": str(run) if run else ""})
-            refined_centers: list[float] = []
+            refined_ids = set()
             for index, (center, span) in enumerate(windows):
                 control.checkpoint()
                 requested = replace(plan.settings, center_hz=center, span_hz=span)
@@ -116,8 +124,8 @@ def scan(analyzer: Analyzer, plan: ScanPlan, repository: Repository,
                 coverage.append((spectrum.frequency_hz[0], spectrum.frequency_hz[-1]))
                 if run and save_raw:
                     repository.save_spectrum(run, f"p{pass_number:04}_w{index:05}_overview", spectrum)
-                for finding in found:
-                    registry.observe(finding, pass_number, False, simulated=analyzer.simulated)
+                ids = [registry.observe(finding, pass_number, False, simulated=analyzer.simulated)
+                       for finding in found]
                 emit({"type": "overview", "spectrum": spectrum, "detections": found,
                       "rows": registry.snapshot(), "pass": pass_number,
                       "index": index + 1, "total": len(windows),
@@ -128,21 +136,25 @@ def scan(analyzer: Analyzer, plan: ScanPlan, repository: Repository,
                         "detections": [asdict(v) for v in found], "simulated": analyzer.simulated})
                 if not plan.refine:
                     continue
-                for finding in found:
-                    if any(abs(finding.center_hz - previous) < 70_000 for previous in refined_centers):
+                for finding, row_id in zip(found, ids):
+                    if row_id in refined_ids:
                         continue
                     control.checkpoint()
-                    refined_centers.append(finding.center_hz)
-                    detail_span = min(span, max(250_000, (finding.stop_hz - finding.start_hz) * 2.5))
-                    detail = replace(requested, center_hz=finding.center_hz, span_hz=detail_span,
+                    refined_ids.add(row_id)
+                    detail_span = 250_000
+                    lower, upper = analyzer.frequency_limits_hz
+                    detail_center = min(max(finding.center_hz, max(1, lower) + detail_span / 2),
+                                        upper - detail_span / 2)
+                    detail = replace(requested, center_hz=detail_center, span_hz=detail_span, points=501,
                                      rbw_hz=min(requested.rbw_hz, 3000),
                                      vbw_hz=min(requested.vbw_hz, 3000))
                     analyzer.apply_settings(detail)
-                    detailed_spectrum = analyzer.capture(max(3, plan.sweeps), control.cancel)
+                    detailed_spectrum = analyzer.capture(classifier.sweeps, control.cancel)
                     captures += 1
-                    candidates = detector.detect(detailed_spectrum, plan.threshold_db)
-                    for candidate in candidates:
-                        registry.observe(candidate, pass_number, True, simulated=analyzer.simulated)
+                    label, origin = classifier.predict(detailed_spectrum)
+                    classified = replace(finding, modulation=label, origin=origin)
+                    candidates = [classified]
+                    registry.observe(classified, pass_number, True, simulated=analyzer.simulated)
                     emit({"type": "detail", "spectrum": detailed_spectrum,
                           "detections": candidates, "rows": registry.snapshot(),
                           "pass": pass_number, "elapsed": time.perf_counter() - started})

@@ -58,7 +58,7 @@ def main() -> int:
                 state['step'] = 1
             elif step == 1 and window.job is None:
                 assert window.rows and window.table.rowCount() == len(window.rows)
-                assert all(row['modulation'] == 'Неизвестно' for row in window.rows)
+                assert any(row['refined'] and row['modulation'] in ('АМ', 'ЧМ', 'Шум') for row in window.rows)
                 assert window.progress.value() == 100
                 assert window.scan_sweeps.value() == 4
                 assert Path(window.last_run, 'session.json').exists()
